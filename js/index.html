@@ -1,0 +1,215 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tiny-voca in plain JavaScript</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; }
+  select, button, textarea { font: inherit; padding: .3rem .5rem; max-width: 100%; box-sizing: border-box; }
+  textarea { width: 100%; }
+  pre { white-space: pre-wrap; background: #8881; padding: .75rem; border-radius: .4rem; font-size: 13px; }
+</style>
+
+<h1>tiny-voca in plain JavaScript</h1>
+<p>
+  <textarea id="typing" rows="4" cols="50">The weather is nice today, and I feel very relaxed.</textarea>
+</p>
+<p>
+  <select id="voice"></select>
+  <select id="bits">
+    <option value="0">float32 weights</option>
+    <option value="8">8 bit</option>
+    <option value="4" selected>4 bit</option>
+  </select>
+  <button id="play">Play</button>
+  <button id="measure">Measure the speed</button>
+  <a id="save" download="tiny-voca.wav" hidden>Save as WAV</a>
+</p>
+<pre id="log">Loading…</pre>
+
+<script type="module">
+const query = new URLSearchParams(location.search);
+const { readGGUF, TinyVoca, pack, expand, packable, spent } = await import(query.get("script") || "./tiny-voca.js");
+const { fromGGUF } = await import("./dizione/engine.js");
+const url = query.get("file") || "https://huggingface.co/n4ze3m/tiny-voca/resolve/main/gguf/tiny-voca-orig.gguf";
+const $ = (id) => document.getElementById(id);
+const typing = $("typing");
+const log = (text) => { $("log").textContent = text; };
+const paint = () => new Promise((done) => setTimeout(done, 20));
+
+let buffer, voca, phonemizer, bits, ready;
+async function load() {
+  if (!buffer) {
+    log(`Downloading ${url}`);
+    buffer = await (await fetch(url)).arrayBuffer();
+  }
+  const wanted = Number($("bits").value);
+  if (voca && bits === wanted) return;
+  log(wanted ? `Packing the weights to ${wanted} bit…` : "Reading the file…");
+  await paint();
+  const file = readGGUF(buffer), started = performance.now();
+  let size = buffer.byteLength, kind = wanted ? `${wanted} bit` : "float32";
+  if (file.meta["tiny_voca.packing"]) {
+    $("bits").disabled = true;
+    kind = "packed as the file has them";
+  } else if (wanted) {
+    for (const [name, tensor] of Object.entries(file.tensors)) {
+      if (!packable(name, tensor.shape)) continue;
+      const bytes = pack(tensor.data, tensor.shape, wanted);
+      size += bytes.length - tensor.data.byteLength;
+      tensor.data = expand(bytes, wanted, tensor.shape);
+    }
+  }
+  voca = new TinyVoca(file);
+  bits = wanted;
+  phonemizer ||= fromGGUF(file);
+  if (!$("voice").length) $("voice").replaceChildren(...voca.voices.map((name) => new Option(name, name, false, name === "M2")));
+  ready = `Weights: ${kind}. The file would be ${(size / 1e6).toFixed(2)} MB. Ready in ${(performance.now() - started).toFixed(0)} ms.`;
+  log(ready);
+}
+
+const ABBREVIATIONS = /(?:\b(?:mr|mrs|ms|dr|prof|sr|jr|st|vs|etc|no|inc|ltd|co|e\.g|i\.e|a\.m|p\.m)|\b[A-Z])\.$/i;
+
+function sentences(text) {
+  const parts = [];
+  let current = "";
+  for (const piece of text.replace(/\s+/g, " ").trim().split(/(?<=[.!?…]["')\]]?)\s+(?=["'(\[]?[A-Z0-9])/)) {
+    current = current ? current + " " + piece : piece;
+    if (!ABBREVIATIONS.test(current)) { parts.push(current); current = ""; }
+  }
+  if (current) parts.push(current);
+  return parts.filter((part) => /[\p{L}\p{N}]/u.test(part));
+}
+
+function finished(text) {
+  const body = text.replace(/\s+$/, "");
+  if (!body) return text;
+  const last = body.split(/\s+/).pop();
+  const marked = /[\p{L}\p{N}]/u.test(last) ? /[.!?…,;:]["'”’)\]»]*$/.test(last) : /[.!?…]/.test(last) || /^[,;:]$/.test(last);
+  return marked ? text : body + ".";
+}
+
+function fit(sentence) {
+  let result;
+  try {
+    result = phonemizer.phonemize(sentence);
+  } catch (error) {
+    if (error.message !== "the text has nothing to pronounce") throw error;
+    return [];
+  }
+  if (result.ids.length <= voca.config.max_tokens - 12) {
+    const phonemes = result.symbols.map((symbol, i) => ["", "ˈ", "ˌ"][result.stress[i]] + symbol).slice(1, -1).join(" ");
+    return [{ ids: result.ids, stress: result.stress, phonemes }];
+  }
+  const pieces = sentence.split(/(?<=[,;:—])\s+/);
+  if (pieces.length > 1) return pieces.flatMap(fit);
+  const words = sentence.split(" ");
+  if (words.length < 2) return [];
+  const half = Math.ceil(words.length / 2);
+  return [...fit(words.slice(0, half).join(" ")), ...fit(words.slice(half).join(" "))];
+}
+
+const limited = (audio) => {
+  const loudest = audio.reduce((top, sample) => Math.max(top, Math.abs(sample)), 0);
+  return loudest > 0.99 ? audio.map((sample) => sample * 0.99 / loudest) : audio;
+};
+
+function wav(audio, rate) {
+  const view = new DataView(new ArrayBuffer(44 + 2 * audio.length));
+  const text = (at, letters) => [...letters].forEach((letter, i) => view.setUint8(at + i, letter.charCodeAt(0)));
+  text(0, "RIFF"); view.setUint32(4, 36 + 2 * audio.length, true); text(8, "WAVEfmt ");
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, rate, true);
+  view.setUint32(28, 2 * rate, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  text(36, "data"); view.setUint32(40, 2 * audio.length, true);
+  audio.forEach((sample, i) => view.setInt16(44 + 2 * i, Math.round(sample * 32767), true));
+  return new Blob([view], { type: "audio/wav" });
+}
+
+let context, sources = [], run = 0;
+$("play").onclick = async () => {
+  context ||= new AudioContext();
+  const mine = ++run;
+  sources.forEach((source) => source.stop());
+  sources = [];
+  $("save").hidden = true;
+  await load();
+  if (mine !== run) return;
+  let utterances;
+  try {
+    utterances = sentences(finished(typing.value)).flatMap(fit);
+  } catch (error) {
+    log(`${ready}\n${error.message}`);
+    return;
+  }
+  if (!utterances.length) { log(`${ready}\ntiny-voca only reads English for now.`); return; }
+  log(`${ready}\nSpeaking…`);
+  await paint();
+  const rate = voca.config.sample_rate, chunks = [], lines = [];
+  let next = 0, work = 0;
+  for (const [seed, { ids, stress, phonemes }] of utterances.entries()) {
+    const started = performance.now();
+    let audio;
+    try {
+      ({ audio } = voca.synthesize(ids, stress, { voice: $("voice").value, seed }));
+    } catch (error) {
+      log(`${ready}\n${error.message}`);
+      return;
+    }
+    work += (performance.now() - started) / 1000;
+    if (mine !== run) return;
+    chunks.push(audio);
+    const heard = limited(audio), sound = context.createBuffer(1, heard.length, rate), source = context.createBufferSource();
+    sound.copyToChannel(heard, 0);
+    source.buffer = sound;
+    source.connect(context.destination);
+    next = Math.max(next, context.currentTime + 0.05);
+    source.start(next);
+    next += heard.length / rate;
+    sources.push(source);
+    lines.push(phonemes);
+    log(`${ready}\nSentence ${seed + 1} of ${utterances.length}\n\n${lines.join("\n")}`);
+    await paint();
+    if (mine !== run) return;
+  }
+  const whole = new Float32Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
+  chunks.reduce((at, chunk) => (whole.set(chunk, at), at + chunk.length), 0);
+  URL.revokeObjectURL($("save").href);
+  $("save").href = URL.createObjectURL(wav(limited(whole), rate));
+  $("save").hidden = false;
+  const seconds = whole.length / rate;
+  log(`${ready}\n${seconds.toFixed(2)} s of audio made in ${work.toFixed(2)} s: ${(seconds / work).toFixed(1)} times real time.` +
+      `\n\n${lines.join("\n")}`);
+};
+
+async function measure() {
+  await load();
+  const sentences = await (await fetch("test/sentences.json")).json();
+  for (const name in spent) delete spent[name];
+  const lines = [];
+  let audioSeconds = 0, workSeconds = 0;
+  for (const [number, { ids, stress }] of sentences.entries()) {
+    for (const voice of voca.voices) {
+      let best = Infinity, audio;
+      for (let run = 0; run < 3; run++) {
+        const started = performance.now();
+        ({ audio } = voca.synthesize(ids, stress, { voice }));
+        best = Math.min(best, (performance.now() - started) / 1000);
+      }
+      const seconds = audio.length / voca.config.sample_rate;
+      audioSeconds += seconds;
+      workSeconds += best;
+      lines.push(`sentence ${number} ${voice}: ${seconds.toFixed(2)} s in ${best.toFixed(2)} s = ${(seconds / best).toFixed(1)}x`);
+      log(lines.join("\n"));
+      await paint();
+    }
+  }
+  const total = Object.values(spent).reduce((a, b) => a + b, 0);
+  const parts = Object.entries(spent).sort((a, b) => b[1] - a[1]).map(([name, ms]) => `${name} ${(100 * ms / total).toFixed(0)}%`).join(", ");
+  const summary = `${audioSeconds.toFixed(1)} s of audio in ${workSeconds.toFixed(2)} s = ${(audioSeconds / workSeconds).toFixed(1)} times real time`;
+  log([...lines, "", summary, "where the time goes: " + parts].join("\n"));
+  window.result = { speed: audioSeconds / workSeconds, summary, parts };
+  if (query.has("bench")) fetch("result?" + new URLSearchParams({ speed: (audioSeconds / workSeconds).toFixed(2), parts, browser: navigator.userAgent })).catch(() => {});
+}
+$("measure").onclick = measure;
+$("bits").onchange = load;
+if (query.has("bench")) await measure(); else await load();
+</script>
