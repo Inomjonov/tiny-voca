@@ -22,18 +22,20 @@ export function readGGUF(buffer) {
   if (u32() !== 0x46554747) throw new Error("not a GGUF file");
   u32();
   const tensorCount = u64(), keyCount = u64(), meta = {}, list = [], keysStart = at;
-  for (let i = 0; i < keyCount; i++) { const key = string(); meta[key] = value(u32()); }
-  const keys = { count: keyCount, bytes: bytes.subarray(keysStart, at) };
+  const keys = {};
+  for (let i = 0; i < keyCount; i++) {
+    const from = at, key = string();
+    meta[key] = value(u32());
+    keys[key] = bytes.subarray(from, at);
+  }
   for (let i = 0; i < tensorCount; i++) {
     const name = string(), shape = Array.from({ length: u32() }, u64).reverse();
     list.push({ name, shape, type: u32(), offset: u64() });
   }
   const align = meta["general.alignment"] || 32, start = Math.ceil(at / align) * align;
-  const tensors = {}, packing = JSON.parse(meta["tiny_voca.packing"] || "{}");
+  const tensors = {};
   for (const { name, shape, type, offset } of list) {
-    const packed = packing[name], from = start + offset;
-    tensors[name] = packed ? { shape: packed.shape, data: expand(bytes.subarray(from, from + shape[0]), packed.bits, packed.shape) }
-                           : { shape, data: unpack(buffer, from, type, shape.reduce((a, b) => a * b, 1)) };
+    tensors[name] = { shape, type, data: unpack(buffer, start + offset, type, shape.reduce((a, b) => a * b, 1)) };
   }
   const files = {}, names = meta["audiocpp.embedded_files.names"] || [], offsets = meta["audiocpp.embedded_files.offsets"];
   names.forEach((name, i) => { files[name] = meta["audiocpp.embedded_files.data"].subarray(offsets[i], offsets[i + 1]); });
@@ -68,53 +70,26 @@ function half(bits) {
   return sign * (1 + fraction / 1024) * 2 ** (exponent - 15);
 }
 
-export const packable = (name, shape) => shape.length === 2 && name.includes(".blocks.");
-
-export function pack(data, [rows, width], bits) {
-  const levels = 1 << bits, bytes = new Uint8Array(4 * rows + Math.ceil(rows * width * bits / 8)), scales = new DataView(bytes.buffer);
-  let at = 4 * rows, hold = 0, held = 0;
-  for (let r = 0; r < rows; r++) {
-    const row = data.subarray(r * width, (r + 1) * width);
-    let scale = row.reduce((top, w) => Math.max(top, Math.abs(w)), 0) / (levels - 1) || 1e-9;
-    const code = (w) => Math.min(Math.max(Math.round((w / scale + levels - 1) / 2), 0), levels - 1);
-    for (let pass = 0; pass < 30; pass++) {
-      let top = 0, bottom = 0;
-      for (const w of row) { const q = 2 * code(w) + 1 - levels; top += w * q; bottom += q * q; }
-      scale = top / bottom || 1e-9;
-    }
-    scales.setFloat32(4 * r, scale, true);
-    scale = scales.getFloat32(4 * r, true);
-    for (const w of row) {
-      hold |= code(w) << held;
-      held += bits;
-      while (held >= 8) { bytes[at++] = hold & 255; hold >>>= 8; held -= 8; }
-    }
-  }
-  if (held) bytes[at] = hold;
-  return bytes;
-}
-
-export function expand(bytes, bits, [rows, width]) {
-  const out = new Float32Array(rows * width), levels = 1 << bits, scales = new DataView(bytes.buffer, bytes.byteOffset, 4 * rows);
-  let at = 4 * rows, hold = 0, held = 0;
-  for (let r = 0; r < rows; r++) {
-    const scale = scales.getFloat32(4 * r, true);
-    for (let i = 0; i < width; i++) {
-      while (held < bits) { hold |= bytes[at++] << held; held += 8; }
-      out[r * width + i] = (2 * (hold & (levels - 1)) + 1 - levels) * scale;
-      hold >>>= bits;
-      held -= bits;
-    }
-  }
-  return out;
-}
-
 export const spent = {};
 const now = () => performance.now();
 const tick = (name, since) => { spent[name] = (spent[name] || 0) + now() - since; };
 
+let lent = [], spare = new Map();
+function floats(count) {
+  const array = spare.get(count)?.pop() || new Float32Array(count);
+  lent.push(array);
+  return array;
+}
+
+function giveBack(mark) {
+  for (const array of lent.splice(mark)) {
+    if (!spare.has(array.length)) spare.set(array.length, []);
+    spare.get(array.length).push(array);
+  }
+}
+
 function multiply(x, count, weight, bias, outputs, inputs) {
-  const y = new Float32Array(count * outputs), four = new Float64Array(4 * inputs);
+  const y = floats(count * outputs), four = new Float64Array(4 * inputs);
   for (let t = 0; t < count; t += 4) {
     const t1 = Math.min(t + 1, count - 1), t2 = Math.min(t + 2, count - 1), t3 = Math.min(t + 3, count - 1);
     for (let i = 0; i < inputs; i++) {
@@ -143,7 +118,7 @@ function linear(x, count, { weight, bias, shape: [outputs, inputs] }) {
 }
 
 function normalize(x, count, { weight, bias }) {
-  const since = now(), width = weight.length, y = new Float32Array(x.length);
+  const since = now(), width = weight.length, y = floats(x.length);
   for (let t = 0; t < count; t++) {
     const row = t * width;
     let mean = 0, spread = 0;
@@ -177,7 +152,7 @@ function gelu(x) {
 }
 
 function convolve(x, count, { weight, bias, shape: [outputs, inputs, taps] }) {
-  const since = now(), y = new Float32Array(count * outputs), reach = taps >> 1;
+  const since = now(), y = floats(count * outputs), reach = taps >> 1;
   for (let t = 0; t < count; t++) {
     const first = Math.max(0, reach - t), end = Math.min(taps, count + reach - t);
     for (let o = 0; o < outputs; o++) {
@@ -194,7 +169,7 @@ function convolve(x, count, { weight, bias, shape: [outputs, inputs, taps] }) {
 }
 
 function depthwise(x, count, { weight, bias, shape: [channels, , taps] }) {
-  const since = now(), y = new Float32Array(count * channels), reach = taps >> 1;
+  const since = now(), y = floats(count * channels), reach = taps >> 1;
   for (let t = 0; t < count; t++) {
     const first = Math.max(0, reach - t), end = Math.min(taps, count + reach - t);
     for (let c = 0; c < channels; c++) {
@@ -210,9 +185,10 @@ function depthwise(x, count, { weight, bias, shape: [channels, , taps] }) {
 function attention(x, count, block, heads, turn) {
   const channels = block.out.shape[0], width = channels / heads, none = new Float32Array(Math.max(count, width));
   const qkv = linear(x, count, block.qkv);
-  const since = now(), mixed = new Float32Array(count * channels), scale = 1 / Math.sqrt(width);
-  const queries = new Float32Array(count * width), keys = new Float32Array(count * width), values = new Float32Array(width * count);
+  const since = now(), mixed = floats(count * channels), scale = 1 / Math.sqrt(width);
+  const queries = floats(count * width), keys = floats(count * width), values = floats(width * count);
   for (let h = 0; h < heads; h++) {
+    const mark = lent.length;
     for (let t = 0; t < count; t++) {
       const q = t * 3 * channels + h * width, k = q + channels, v = k + channels, row = t * width;
       for (let i = 0; i < width; i += 2) {
@@ -234,6 +210,7 @@ function attention(x, count, block, heads, turn) {
     }
     const mix = multiply(share, count, values, none, width, count);
     for (let t = 0; t < count; t++) mixed.set(mix.subarray(t * width, (t + 1) * width), t * channels + h * width);
+    giveBack(mark);
   }
   tick("attention", since);
   return linear(mixed, count, block.out);
@@ -253,9 +230,11 @@ function transformer(x, count, stack, heads) {
     }
   }
   for (const block of stack.blocks) {
+    const mark = lent.length;
     add(x, attention(normalize(x, count, block.norm1), count, block, heads, turn));
     const near = depthwise(normalize(x, count, block.norm2), count, block.depthwise);
     add(x, linear(gelu(linear(near, count, block.expand)), count, block.project));
+    giveBack(mark);
   }
   return normalize(x, count, stack.norm);
 }
@@ -410,6 +389,8 @@ export class TinyVoca {
       throw new Error("expected 1 to max_tokens phoneme ids, as many stress values, and a known voice");
     }
 
+    lent = [];
+    spare = new Map();
     let x = new Float32Array(count * width);
     for (let n = 0; n < count; n++) {
       for (let i = 0; i < width; i++) {
@@ -475,6 +456,8 @@ export class TinyVoca {
       for (let i = 0; i < c.noise_cep; i++) cepstrum[i] = g[here * gw + i] * lifter(i);
       cepstrum[0] += g[here * gw + c.noise_cep + sub % gSteps];
     });
+    lent = [];
+    spare = new Map();
     return { audio: add(voicedPart, noisePart), durations, f0 };
   }
 }

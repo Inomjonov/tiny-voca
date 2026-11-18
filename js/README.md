@@ -1,18 +1,15 @@
 # tiny-voca in plain JavaScript
 
-An experiment: the model in one script, with no libraries. No ONNX Runtime, no
-WebAssembly, no npm packages. It reads one GGUF file and makes sound.
+An experiment: the model and its phonemizer in plain scripts, with no
+libraries. No ONNX Runtime, no WebAssembly, no Pyodide, no npm packages. It
+reads one GGUF file of 8 MB, turns text into phonemes and makes sound.
 
 - `tiny-voca.js`: the GGUF reader and the model. Open it and read from the top.
-- `index.html`: a test page. Type a text, pick a voice and the bits of the weights (4 by default), press Play.
+- `dizione/`: the phonemizer, a port of [dizione](https://github.com/n4ze3m/dizione). See below.
+- `index.html`: the page. Type a text, pick a voice, press Play.
   Each sentence plays as soon as it is made, and the whole clip can be saved as a WAV file.
-- `pack.mjs`: makes a smaller GGUF with 1 to 8 bits a weight.
-- `test/`: the check against PyTorch.
-
-So far this is the model only. The page looks every word up in the dictionary
-inside the GGUF; numbers and words the dictionary does not have are skipped.
-The real phonemizer (dizione) is not here yet. The ten test sentences in
-`test/sentences.json` were turned into phonemes by it beforehand.
+- `pack.mjs`: makes the one file the page reads, `tiny-voca.gguf`.
+- `test/`: the checks against PyTorch and against Python dizione.
 
 ## Try it
 
@@ -21,9 +18,18 @@ cd js
 python3 -m http.server 8000
 ```
 
-Open http://localhost:8000. The page downloads the GGUF from
-[Hugging Face](https://huggingface.co/n4ze3m/tiny-voca/tree/main/gguf).
-`?file=URL` uses another copy.
+Open http://localhost:8000. The page downloads one file,
+[`gguf/tiny-voca-js.gguf`](https://huggingface.co/n4ze3m/tiny-voca/tree/main/gguf),
+from Hugging Face and nothing else.
+
+To make that file yourself and use your own copy:
+
+```
+node js/pack.mjs tiny-voca-orig.gguf path/to/dizione/src/dizione/data js/tiny-voca.gguf
+```
+
+It is made from the float32 file on Hugging Face and the small tables of
+dizione. Open the page with `?file=tiny-voca.gguf` to read it.
 
 ## Check against PyTorch
 
@@ -37,25 +43,86 @@ runs the same phonemes and the same noise through the JavaScript model and
 prints, for each sentence and voice, whether the lengths are equal and how far
 the waveform is.
 
-## Smaller files
+## The phonemizer
+
+`dizione/` turns text into phoneme ids and a stress value for each id. It must
+give exactly what the Python dizione gives. It follows dizione with the two
+fixes for letters with full stops ("U.S.A", "Ph.D.", "J. R. R. Tolkien") and
+for a page after a number ("Chapter 3, p. 45").
+
+- `normalize.js`: text to words: numbers, money, dates, units, abbreviations, signs.
+- `pyre.js`: Python regular expressions and string methods, so `normalize.js` can stay line by line next to `normalize.py`.
+- `engine.js`: the phonemizer: dictionary, endings, names, phrases, homographs, unknown words. `fromGGUF` builds it from the file.
+- `g2p.js`: the small model that guesses unknown words.
+- `align.js`, `convert.js`: letters lined up with phonemes, and ARPAbet turned into the phoneme set.
+- `morphology.js`, `homographs.js`, `sentence.js`: endings, words with two readings, sentence stress.
+- `symbols.js`: the symbols and their ids.
+- `lexicon.js`: the packed dictionary.
+- `tables.js`: reads the ten small tables (abbreviations, units, exceptions and so on).
+
+All its data comes from the GGUF: the dictionary, the alignment table, the
+homograph data, the unknown-word model and the ten small tables. The float32
+file on Hugging Face has no tables, so the phonemizer needs a file made by
+`pack.mjs`.
 
 ```
-node js/pack.mjs tiny-voca-orig.gguf tiny-voca-2bit.gguf 2
+node js/test/vectors.mjs js/tiny-voca.gguf path/to/dizione/tests/vectors
 ```
 
-The last number is the bits for each weight, 1 to 8. The 44 large matrices of
-the transformer blocks are packed; everything else stays float32. The page and
-the check read the result like any other file (`?file=tiny-voca-2bit.gguf`).
-The page can also pack the float32 file itself: choose the bits next to the
-voice. That gives the same weights as the packed file.
+This reads the test vectors of dizione (texts with the ids and stress they
+must give) and prints how many texts differ. Today: 0 of 13,973. The vector
+files are not copied here; give the folder.
 
-How a matrix is packed: every row gets one scale `s` (float32), and every
-weight becomes a code `c` of that many bits. The weight is read back as
-`(2c + 1 - levels) * s`, with `levels = 2^bits`. With 1 bit that is `+s` or
-`-s`; with 2 bits `-3s, -s, s, 3s`. The scale is the one with the smallest
-squared error for the row. In the file a packed matrix is a run of bytes (the
-scales, then the codes), and the key `tiny_voca.packing` lists the packed
-matrices with their bits and shape, so it is still a valid GGUF.
+`node js/test/dizione.mjs ids model.gguf texts.txt out.txt` writes the ids and
+stress for a file with one text on each line.
+
+`node js/test/dictionary.mjs js/tiny-voca.gguf path/to/vectors` measures the
+sizes of the dictionary in several forms and what the unknown-word model does
+at 16 and 8 bits. It runs the model over all 124,926 words and takes about 40
+minutes on one core.
+
+## The one file
+
+`pack.mjs` turns the float32 file of 23.57 MB into `tiny-voca.gguf` of 7.99 MB.
+It is an ordinary GGUF: the `gguf` Python package lists it. Three things
+change.
+
+The weights. The 44 large matrices of the transformer blocks are stored with
+8 bits a weight, in the Q8_0 form of GGUF: every 32 weights share one scale
+(16-bit float), and each weight is a whole number from -127 to 127 times that
+scale. The scale is the largest weight of the 32, divided by 127. These are
+the same numbers as in `tiny-voca-q8_0.gguf` on Hugging Face. Everything else
+stays float32. On the 20 test utterances 19 keep the durations of PyTorch. An
+earlier try with one scale for a whole row was 0.2 MB smaller but kept only
+14 of 20: a row has weights of very different sizes, and one scale is too
+coarse for the small ones.
+
+The dictionary. In the float32 file it is a text of 3.45 MB, one word and its
+phonemes on each line. `pack.mjs` stores it as `phonemizer/lexicon.packed.gz`
+in 0.55 MB. The words are sorted, so each word is stored as the number of
+bytes it shares with the word before and then the rest. The phonemes are
+stored the same way, with one byte for each phoneme and its stress. The
+result is gzipped, and the page reads it with `DecompressionStream`. Every
+word and every pronunciation comes back the same.
+
+The tables. The ten small text tables of dizione are put inside as they are.
 
 `node js/test/clips.mjs file.gguf folder label 1 2` writes sentences 1 and 2
 as WAV files.
+
+## Memory
+
+Once loaded, the model holds about 25 MB and the phonemizer about 21 MB.
+Two things keep the peak near that.
+
+The dictionary is unpacked one entry at a time into one small buffer that is
+used again for every entry, so loading it makes no pile of short-lived arrays.
+
+In `tiny-voca.js` the working arrays of a sentence are used again. `floats`
+hands out an array and remembers it; `giveBack` puts the arrays made since a
+mark on a spare list, where the next `floats` call of the same size finds
+them. A transformer block gives its arrays back when it ends, and so does
+each attention head. One long sentence asks for 116 MB of arrays this way and
+only 13 MB are really made. Every array from `floats` is written in full
+before it is read, so old numbers in it do not matter, and the sound is the
+same sample for sample.

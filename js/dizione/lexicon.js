@@ -1,5 +1,6 @@
 import { PHONES } from "./symbols.js";
 
+export const PACKED = "lexicon.packed.gz";
 const MARKS = ["", "ˈ", "ˌ"];
 const code = (unit) => {
   const stress = Math.max(MARKS.indexOf(unit[0]), 0);
@@ -26,20 +27,17 @@ export function packLexicon(entries) {
 
 export function unpackLexicon(bytes) {
   const count = new DataView(bytes.buffer, bytes.byteOffset).getUint32(0, true), decoder = new TextDecoder();
+  const item = new Uint8Array(4096), words = new Array(count), lexicon = new Map();
   let at = 4;
-  const run = () => {
-    const items = [];
-    for (let i = 0; i < count; i++) {
-      const same = bytes[at++], end = bytes.indexOf(0, at), item = new Uint8Array(same + end - at);
-      if (i) item.set(items[i - 1].subarray(0, same));
-      item.set(bytes.subarray(at, end), same);
-      items.push(item);
-      at = end + 1;
-    }
-    return items;
+  const next = () => {
+    const same = bytes[at++], end = bytes.indexOf(0, at), length = same + end - at;
+    item.set(bytes.subarray(at, end), same);
+    at = end + 1;
+    return length;
   };
-  const words = run().map((word) => decoder.decode(word)), sounds = run();
-  return new Map(words.map((word, i) => [word, Array.from(sounds[i], unit).join(" ")]));
+  for (let i = 0; i < count; i++) words[i] = decoder.decode(item.subarray(0, next()));
+  for (let i = 0; i < count; i++) lexicon.set(words[i], Array.from(item.subarray(0, next()), unit).join(" "));
+  return lexicon;
 }
 
 export async function gunzip(bytes) {

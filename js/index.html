@@ -15,11 +15,6 @@
 </p>
 <p>
   <select id="voice"></select>
-  <select id="bits">
-    <option value="0">float32 weights</option>
-    <option value="8">8 bit</option>
-    <option value="4" selected>4 bit</option>
-  </select>
   <button id="play">Play</button>
   <button id="measure">Measure the speed</button>
   <a id="save" download="tiny-voca.wav" hidden>Save as WAV</a>
@@ -28,42 +23,30 @@
 
 <script type="module">
 const query = new URLSearchParams(location.search);
-const { readGGUF, TinyVoca, pack, expand, packable, spent } = await import(query.get("script") || "./tiny-voca.js");
+const { readGGUF, TinyVoca, spent } = await import(query.get("script") || "./tiny-voca.js");
 const { fromGGUF } = await import("./dizione/engine.js");
-const url = query.get("file") || "https://huggingface.co/n4ze3m/tiny-voca/resolve/main/gguf/tiny-voca-orig.gguf";
+const url = query.get("file") || "https://huggingface.co/n4ze3m/tiny-voca/resolve/main/gguf/tiny-voca-js.gguf";
 const $ = (id) => document.getElementById(id);
 const typing = $("typing");
 const log = (text) => { $("log").textContent = text; };
 const paint = () => new Promise((done) => setTimeout(done, 20));
 
-let buffer, voca, phonemizer, bits, ready;
+let voca, phonemizer, ready;
 async function load() {
-  if (!buffer) {
-    log(`Downloading ${url}`);
-    buffer = await (await fetch(url)).arrayBuffer();
-  }
-  const wanted = Number($("bits").value);
-  if (voca && bits === wanted) return;
-  log(wanted ? `Packing the weights to ${wanted} bit…` : "Reading the file…");
+  if (voca) return;
+  log(`Downloading ${url}`);
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${url}: ${response.status}`);
+  const buffer = await response.arrayBuffer();
+  const downloaded = performance.now();
+  log("Reading the file…");
   await paint();
-  const file = readGGUF(buffer), started = performance.now();
-  let size = buffer.byteLength, kind = wanted ? `${wanted} bit` : "float32";
-  if (file.meta["tiny_voca.packing"]) {
-    $("bits").disabled = true;
-    kind = "packed as the file has them";
-  } else if (wanted) {
-    for (const [name, tensor] of Object.entries(file.tensors)) {
-      if (!packable(name, tensor.shape)) continue;
-      const bytes = pack(tensor.data, tensor.shape, wanted);
-      size += bytes.length - tensor.data.byteLength;
-      tensor.data = expand(bytes, wanted, tensor.shape);
-    }
-  }
+  const file = readGGUF(buffer);
   voca = new TinyVoca(file);
-  bits = wanted;
-  phonemizer ||= fromGGUF(file);
-  if (!$("voice").length) $("voice").replaceChildren(...voca.voices.map((name) => new Option(name, name, false, name === "M2")));
-  ready = `Weights: ${kind}. The file would be ${(size / 1e6).toFixed(2)} MB. Ready in ${(performance.now() - started).toFixed(0)} ms.`;
+  phonemizer = await fromGGUF(file);
+  $("voice").replaceChildren(...voca.voices.map((name) => new Option(name, name, false, name === "M2")));
+  window.loaded = { download: downloaded, ready: performance.now() - downloaded };
+  ready = `${(buffer.byteLength / 1e6).toFixed(2)} MB. Ready ${window.loaded.ready.toFixed(0)} ms after the download.`;
   log(ready);
 }
 
@@ -127,7 +110,7 @@ function wav(audio, rate) {
 let context, sources = [], run = 0;
 $("play").onclick = async () => {
   context ||= new AudioContext();
-  const mine = ++run;
+  const mine = ++run, clicked = performance.now();
   sources.forEach((source) => source.stop());
   sources = [];
   $("save").hidden = true;
@@ -163,6 +146,7 @@ $("play").onclick = async () => {
     source.connect(context.destination);
     next = Math.max(next, context.currentTime + 0.05);
     source.start(next);
+    window.first ??= { sinceClick: performance.now() - clicked, sinceOpen: performance.now() };
     next += heard.length / rate;
     sources.push(source);
     lines.push(phonemes);
@@ -210,6 +194,10 @@ async function measure() {
   if (query.has("bench")) fetch("result?" + new URLSearchParams({ speed: (audioSeconds / workSeconds).toFixed(2), parts, browser: navigator.userAgent })).catch(() => {});
 }
 $("measure").onclick = measure;
-$("bits").onchange = load;
 if (query.has("bench")) await measure(); else await load();
+if (query.has("first")) {
+  await $("play").onclick();
+  fetch("result?" + new URLSearchParams({ download: window.loaded.download.toFixed(0), ready: window.loaded.ready.toFixed(0),
+    click: window.first.sinceClick.toFixed(0), open: window.first.sinceOpen.toFixed(0), browser: navigator.userAgent })).catch(() => {});
+}
 </script>

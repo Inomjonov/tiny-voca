@@ -6,6 +6,7 @@ import { Aligner } from "./align.js";
 import { convert, fromText, settleStress } from "./convert.js";
 import { Model } from "./g2p.js";
 import { Homographs } from "./homographs.js";
+import { PACKED, unpackLexicon, gunzip } from "./lexicon.js";
 import { Unit } from "./sentence.js";
 import { tokenize, ValueError } from "./symbols.js";
 
@@ -212,9 +213,12 @@ export class Phonemizer {
   }
 }
 
-export function fromGGUF(file) {
+export async function fromGGUF(file) {
   const decoder = new TextDecoder(), text = (name) => decoder.decode(file.files["phonemizer/" + name]);
-  const lexicon = new Map(text("lexicon.tsv").split("\n").filter(Boolean).map((line) => {
+  for (const name in file.files) if (name.endsWith(".txt")) tables.DATA[name.replace("phonemizer/", "")] = decoder.decode(file.files[name]);
+  if (!tables.DATA["units.txt"]) throw new Error("this file has no phonemizer tables: make one with pack.mjs");
+  const packed = file.files["phonemizer/" + PACKED];
+  const lexicon = packed ? unpackLexicon(await gunzip(packed)) : new Map(text("lexicon.tsv").split("\n").filter(Boolean).map((line) => {
     const cut = line.indexOf("\t");
     return [line.slice(0, cut), line.slice(cut + 1)];
   }));

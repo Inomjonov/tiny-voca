@@ -1,7 +1,7 @@
-import { DATA } from "./tables-data.js";
 import { fromText, isArpabet } from "./convert.js";
 import { ValueError } from "./symbols.js";
 
+export const DATA = {};
 const COLUMNS = /\t+| {2,}/;
 const STRESS_CLASSES = new Set(["u", "uf", "ur", "s", "ss", "si", "pf", "p"]);
 const words = (text) => text.trim().split(/\s+/).filter(Boolean);

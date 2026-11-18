@@ -8,7 +8,7 @@ if (!output) {
   process.exit(1);
 }
 const started = performance.now();
-const phonemizer = fromGGUF(readGGUF(new Uint8Array(readFileSync(file)).buffer));
+const phonemizer = await fromGGUF(readGGUF(new Uint8Array(readFileSync(file)).buffer));
 const loaded = performance.now();
 const show = (phones) => (phones ? phones.map(([phone, stress]) => `${phone}/${stress}`).join(" ") : "-");
 const answer = {

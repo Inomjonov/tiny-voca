@@ -309,6 +309,13 @@ export class Normalizer {
   constructor(isWord = null) {
     this.isWord = isWord || (() => true);
     this.abbreviations = new Map(tables.rows("abbreviations.txt").map(([, columns]) => [columns[0], [columns[1], columns[2]]]));
+    const short = [...this.abbreviations.keys(), "st", "dr"].filter((key) => len(key) === 2);
+    const titles = [...new Set(short.flatMap((key) => [key[0].toUpperCase() + key.slice(1).toLowerCase(), key.toUpperCase()]))].sort(compare).join("|");
+    const part = r`(?:[A-Za-z]|(?!(?:` + titles + r`)\.)[A-Z][A-Za-z])\.`;
+    const last = r`(?:(?:(?<=[a-z]\.)[a-z]|(?<=[A-Z]\.)[A-Z])(?![A-Za-z\d]))`;
+    this._dottedForm = re.compile(r`\b(?:(?:` + part + r`){2,}` + last + r`?` +
+      r`|(?:[A-Z]|(?!(?:` + titles + r`)\.)[B-DF-HJ-NP-TV-Z][b-df-hj-np-tv-z])\.[A-Z](?![A-Za-z\d])` +
+      r`|(?:[Ee]\.[Gg]|[Ii]\.[Ee])(?![A-Za-z\d]))`);
     this.units = new Map();
     this.exactUnits = new Map();
     for (const [, columns] of tables.rows("units.txt")) {
@@ -328,7 +335,7 @@ export class Normalizer {
     const names = [...new Set([...this.units.keys(), ...this.exactUnits.keys()].map(re.escape))]
       .sort((a, b) => len(b) - len(a) || compare(a, b));
     this._unitNames = names.join("|");
-    this._unit = re.compile(r`(?<![\w.])(\d[\d,]*(?:\.\d+)?)(?:[-–](\d[\d,]*(?:\.\d+)?))?\s?(` + this._unitNames +
+    this._unit = re.compile(r`(?<![\w.])(\d(?:[\d,]*\d)?(?:\.\d+)?)(?:[-–](\d(?:[\d,]*\d)?(?:\.\d+)?))?\s?(` + this._unitNames +
       r`)(?![A-Za-z])(\.(?=\s+(?-i:[a-z])))?`, re.IGNORECASE);
     this._area = re.compile(r`(?<![\w.])(\d[\d,]*(?:\.\d+)?)\s?(km|cm|mm|m|ft|mi|yd|in)([²³])`);
     this._areaPlain = re.compile(r`(?<![\w.])(\d[\d,]*(?:\.\d+)?)\s?(km|cm|mm|m|ft)([23])(?![\w])`);
@@ -531,6 +538,9 @@ export class Normalizer {
     const unit = match.group(3);
     const names = this.exactUnits.get(unit) || this.units.get(unit.toLowerCase());
     if (names === undefined || (len(unit) === 1 && ["-", "'", "/"].includes(charAt(match.string, match.end(3))))) {
+      return match.group(0);
+    }
+    if (unit === "p" && isspace(charBefore(match.string, match.end(3) - 1)) && re.match(r`\.\s?\d`, match.string.slice(match.end(3)))) {
       return match.group(0);
     }
     const [one, many] = names;
@@ -1022,7 +1032,11 @@ export class Normalizer {
       (m) => Normalizer._compared(m, _COMPARISONS.get(m.group(1))), text);
     text = re.sub(r`(?<=\d) Ti\b`, ` ${_spelled("TI")}`, text);
     text = re.sub(r`\b([Rr])ef\.\s?[Nn]o\.(?=\s)`, r`\1eference number`, text);
-    text = text.includes(".") ? re.sub(r`\b((?:[A-Za-z]\.){2,})`, (m) => this._dotted(m, text), text) : text;
+    if (text.includes(".")) {
+      text = re.sub(r`(?<![\w.])(?:[A-Z]\.(?: [A-Z]\.)+|[Ee]\. g\.|[Ii]\. e\.)`,
+        (m) => (["E. G.", "I. E."].includes(m.group(0)) ? ` ${_spelled(m.group(0)[0] + m.group(0)[3])} ` : m.group(0).replaceAll(" ", "")), text);
+      text = this._dottedForm.sub((m) => this._dotted(m, text), text);
+    }
     text = re.sub(r`\b([A-Za-z]{1,6})\b(\.?)(?![A-Za-z'’])`, (m) => this._abbreviation(m, text), text);
     if (re.search(r`\d`, text)) {
       text = _GLUED.sub((match) => this._glued(match), text);
