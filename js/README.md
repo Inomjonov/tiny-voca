@@ -6,6 +6,8 @@ reads one GGUF file of 8 MB, turns text into phonemes and makes sound.
 
 - `tiny-voca.js`: the GGUF reader and the model. Open it and read from the top.
 - `dizione/`: the phonemizer, a port of [dizione](https://github.com/n4ze3m/dizione). See below.
+- `say.mjs`: the same from the command line, with Node or Bun. No browser.
+- `text.js`: cuts a text into sentences and writes the WAV; the page and `say.mjs` share it.
 - `index.html`: the page. Type a text, pick a voice, press Play.
   Each sentence plays as soon as it is made, and the whole clip can be saved as a WAV file.
 - `pack.mjs`: makes the one file the page reads, `tiny-voca.gguf`.
@@ -30,6 +32,42 @@ node js/pack.mjs tiny-voca-orig.gguf path/to/dizione/src/dizione/data js/tiny-vo
 
 It is made from the float32 file on Hugging Face and the small tables of
 dizione. Open the page with `?file=tiny-voca.gguf` to read it.
+
+## From the command line
+
+```
+node js/say.mjs "Hello! This is tiny voca." --voice M2 --output hello.wav
+bun js/say.mjs "Hello! This is tiny voca." --voice F2 --output hello.wav
+```
+
+No browser and no packages to install. It reads `js/tiny-voca.gguf` if it is
+there, or downloads the file from Hugging Face; `--file` takes another path or
+address. Node and Bun write the same WAV, byte for byte.
+
+Speed on an Apple M5, one thread, over the 20 test utterances (79 s of audio):
+
+| | Times real time | Ready after | Peak memory |
+|---|---|---|---|
+| Node 24 | 9.7 | 192 ms | 238 MB |
+| Bun 1.3 | 13.4 | 104 ms | 518 MB |
+
+In your own code:
+
+```js
+import { readFileSync } from "node:fs";
+import { readGGUF, TinyVoca } from "./tiny-voca.js";
+import { fromGGUF } from "./dizione/engine.js";
+
+const file = readGGUF(new Uint8Array(readFileSync("tiny-voca.gguf")).buffer);
+const voca = new TinyVoca(file);
+const phonemizer = await fromGGUF(file);
+
+const { ids, stress } = phonemizer.phonemize("Hello! This is tiny voca.");
+const { audio } = voca.synthesize(ids, stress, { voice: "M2" });
+```
+
+`audio` is a Float32Array at 24 kHz. One call reads one sentence; `say.mjs`
+shows how a longer text is cut.
 
 ## Check against PyTorch
 
