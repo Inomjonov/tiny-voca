@@ -119,6 +119,7 @@ Languages and voices:
 - [vocina](https://github.com/OfficinePixel/vocina): Italian, with a browser demo.
 - [zerre-tts](https://github.com/erkinemreta1/zerre-tts): Turkish.
 - [clarvia-tts-tiny](https://huggingface.co/wite-tech/clarvia-tts-tiny): Turkish, ten voices, with its own [phonemizer](https://huggingface.co/wite-tech/clarvia-phonemizer) for numbers, dates and money.
+- [tiny-voca-uzbek-navoiy](https://huggingface.co/Inomjonov/tiny-voca-uzbek-navoiy): Uzbek, one male voice, trained from scratch on 7.7 hours of Navoiy-generated speech.
 - [korean-tts](https://github.com/ooodev/korean-tts): Korean, and Korean mixed with English.
 - [tiny-voca-ja-tsukuyomi-chan](https://huggingface.co/ayousanz/tiny-voca-ja-tsukuyomi-chan): Japanese, in Tsukuyomi-chan's voice, under that voice's own terms.
 - [tiny-voca-ja](https://github.com/gachimoto-code/tiny-voca-ja): Japanese, two voices, trained on synthetic speech only.
